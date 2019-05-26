@@ -86,6 +86,8 @@
 #include <uORB/topics/sensor_preflight.h>
 #include <uORB/topics/vehicle_air_data.h>
 #include <uORB/topics/vehicle_magnetometer.h>
+#include <uORB/topics/vehicle_global_position.h>
+#include <uORB/topics/vehicle_gps_position.h>
 
 #include <DevMgr.hpp>
 
@@ -167,6 +169,7 @@ private:
 	int		_diff_pres_sub{-1};			/**< raw differential pressure subscription */
 	int		_vcontrol_mode_sub{-1};		/**< vehicle control mode subscription */
 	int 		_params_sub{-1};			/**< notification of parameter updates */
+	int			_global_position_sub{-1};	// James adds this.
 
 	orb_advert_t	_sensor_pub{nullptr};			/**< combined sensor data topic */
 	orb_advert_t	_airdata_pub{nullptr};			/**< combined sensor data topic */
@@ -297,34 +300,37 @@ Sensors::adc_init()
 void
 Sensors::diff_pres_poll(const vehicle_air_data_s &raw)
 {
+	// James' modification. We are going to read from gps speed and shove it into airspeed. What if gps is lost? no idea.
+	// I actually want to get it from ground speed instead. Where do I get this from?
 	bool updated;
-	orb_check(_diff_pres_sub, &updated);
-
-	if (updated) {
-		differential_pressure_s diff_pres;
-		int ret = orb_copy(ORB_ID(differential_pressure), _diff_pres_sub, &diff_pres);
-
+	orb_check(_global_position_sub, &updated);
+	//printf("here %d\n",updated);
+	if (updated)
+	{
+		vehicle_gps_position_s global_pos;
+		int ret = orb_copy(ORB_ID(vehicle_gps_position), _global_position_sub, &global_pos);
+		//printf("here1\n");
 		if (ret != PX4_OK) {
 			return;
 		}
 
-		float air_temperature_celsius = (diff_pres.temperature > -300.0f) ? diff_pres.temperature :
-						(raw.baro_temp_celcius - PCB_TEMP_ESTIMATE_DEG);
-
+		float airspeed_hack = global_pos.vel_m_s;//sqrt((global_pos.vel_n*global_pos.vel_n) + (global_pos.vel_e*global_pos.vel_e));
+		//printf("here2\n");
 		airspeed_s airspeed;
-		airspeed.timestamp = diff_pres.timestamp;
+		airspeed.timestamp = global_pos.timestamp;
 
-		/* push data into validator */
-		float airspeed_input[3] = { diff_pres.differential_pressure_raw_pa, diff_pres.temperature, 0.0f };
+		airspeed.confidence = 1.0f;
 
-		_airspeed_validator.put(airspeed.timestamp, airspeed_input, diff_pres.error_count,
-					ORB_PRIO_HIGH);
+		airspeed.indicated_airspeed_m_s = airspeed_hack;
+		airspeed.true_airspeed_m_s = airspeed_hack;
+		airspeed.true_airspeed_unfiltered_m_s = airspeed_hack;
+		airspeed.air_temperature_celsius = -1000.0f;
 
-		airspeed.confidence = _airspeed_validator.confidence(hrt_absolute_time());
+		//printf("airspeed hack: %0.3f\n",(double)airspeed_hack);
 
 		enum AIRSPEED_SENSOR_MODEL smodel;
 
-		switch ((diff_pres.device_id >> 16) & 0xFF) {
+		switch (4597777){//(diff_pres.device_id >> 16) & 0xFF) {
 		case DRV_DIFF_PRESS_DEVTYPE_SDP31:
 
 		/* fallthrough */
@@ -341,27 +347,83 @@ Sensors::diff_pres_poll(const vehicle_air_data_s &raw)
 			break;
 		}
 
-		/* don't risk to feed negative airspeed into the system */
-		airspeed.indicated_airspeed_m_s = math::max(0.0f,
-						  calc_indicated_airspeed_corrected((enum AIRSPEED_COMPENSATION_MODEL)_parameters.air_cmodel,
-								  smodel, _parameters.air_tube_length, _parameters.air_tube_diameter_mm,
-								  diff_pres.differential_pressure_filtered_pa, raw.baro_pressure_pa,
-								  air_temperature_celsius));
+		smodel = smodel;
 
-		airspeed.true_airspeed_m_s = math::max(0.0f,
-						       calc_true_airspeed_from_indicated(airspeed.indicated_airspeed_m_s, raw.baro_pressure_pa, air_temperature_celsius));
-
-		airspeed.true_airspeed_unfiltered_m_s = math::max(0.0f,
-							calc_true_airspeed(diff_pres.differential_pressure_raw_pa + raw.baro_pressure_pa, raw.baro_pressure_pa,
-									air_temperature_celsius));
-
-		airspeed.air_temperature_celsius = air_temperature_celsius;
-
+		// Publish it...
 		if (PX4_ISFINITE(airspeed.indicated_airspeed_m_s) && PX4_ISFINITE(airspeed.true_airspeed_m_s)) {
-			int instance;
-			orb_publish_auto(ORB_ID(airspeed), &_airspeed_pub, &airspeed, &instance, ORB_PRIO_DEFAULT);
+					int instance;
+					orb_publish_auto(ORB_ID(airspeed), &_airspeed_pub, &airspeed, &instance, ORB_PRIO_DEFAULT);
 		}
 	}
+
+
+
+//	// The original code.
+//	bool updated;
+//	orb_check(_diff_pres_sub, &updated);
+//
+//	if (updated) {
+//		differential_pressure_s diff_pres;
+//		int ret = orb_copy(ORB_ID(differential_pressure), _diff_pres_sub, &diff_pres);
+//
+//		if (ret != PX4_OK) {
+//			return;
+//		}
+//
+//		float air_temperature_celsius = (diff_pres.temperature > -300.0f) ? diff_pres.temperature :
+//						(raw.baro_temp_celcius - PCB_TEMP_ESTIMATE_DEG);
+//
+//		airspeed_s airspeed;
+//		airspeed.timestamp = diff_pres.timestamp;
+//
+//		/* push data into validator */
+//		float airspeed_input[3] = { diff_pres.differential_pressure_raw_pa, diff_pres.temperature, 0.0f };
+//
+//		_airspeed_validator.put(airspeed.timestamp, airspeed_input, diff_pres.error_count,
+//					ORB_PRIO_HIGH);
+//
+//		airspeed.confidence = _airspeed_validator.confidence(hrt_absolute_time());
+//
+//		enum AIRSPEED_SENSOR_MODEL smodel;
+//
+//		switch ((diff_pres.device_id >> 16) & 0xFF) {
+//		case DRV_DIFF_PRESS_DEVTYPE_SDP31:
+//
+//		/* fallthrough */
+//		case DRV_DIFF_PRESS_DEVTYPE_SDP32:
+//
+//		/* fallthrough */
+//		case DRV_DIFF_PRESS_DEVTYPE_SDP33:
+//			/* fallthrough */
+//			smodel = AIRSPEED_SENSOR_MODEL_SDP3X;
+//			break;
+//
+//		default:
+//			smodel = AIRSPEED_SENSOR_MODEL_MEMBRANE;
+//			break;
+//		}
+//
+//		/* don't risk to feed negative airspeed into the system */
+//		airspeed.indicated_airspeed_m_s = math::max(0.0f,
+//						  calc_indicated_airspeed_corrected((enum AIRSPEED_COMPENSATION_MODEL)_parameters.air_cmodel,
+//								  smodel, _parameters.air_tube_length, _parameters.air_tube_diameter_mm,
+//								  diff_pres.differential_pressure_filtered_pa, raw.baro_pressure_pa,
+//								  air_temperature_celsius));
+//
+//		airspeed.true_airspeed_m_s = math::max(0.0f,
+//						       calc_true_airspeed_from_indicated(airspeed.indicated_airspeed_m_s, raw.baro_pressure_pa, air_temperature_celsius));
+//
+//		airspeed.true_airspeed_unfiltered_m_s = math::max(0.0f,
+//							calc_true_airspeed(diff_pres.differential_pressure_raw_pa + raw.baro_pressure_pa, raw.baro_pressure_pa,
+//									air_temperature_celsius));
+//
+//		airspeed.air_temperature_celsius = air_temperature_celsius;
+//
+//		if (PX4_ISFINITE(airspeed.indicated_airspeed_m_s) && PX4_ISFINITE(airspeed.true_airspeed_m_s)) {
+//			int instance;
+//			orb_publish_auto(ORB_ID(airspeed), &_airspeed_pub, &airspeed, &instance, ORB_PRIO_DEFAULT);
+//		}
+//	}
 }
 
 void
@@ -611,6 +673,9 @@ Sensors::run()
 
 	_actuator_ctrl_0_sub = orb_subscribe(ORB_ID(actuator_controls_0));
 
+	// James adds this
+	_global_position_sub = orb_subscribe(ORB_ID(vehicle_gps_position));
+
 	/* get a set of initial values */
 	_voted_sensors_update.sensors_poll(raw, airdata, magnetometer);
 
@@ -738,6 +803,7 @@ Sensors::run()
 	orb_unadvertise(_sensor_pub);
 	orb_unadvertise(_airdata_pub);
 	orb_unadvertise(_magnetometer_pub);
+	//orb_unadvertise(_global_position_sub);
 
 	_rc_update.deinit();
 	_voted_sensors_update.deinit();

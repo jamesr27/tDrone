@@ -388,6 +388,10 @@ FixedwingPositionControl::airspeed_poll()
 		}
 
 	} else {
+		// Hack to put ground speed into airspeed.
+//		float _ground_speed_hack = 0.0;
+//		_ground_speed_hack = sqrt((_global_pos.vel_n)^2 + (_global_pos.vel_e)^2);
+
 		/* no airspeed updates for one second */
 		if (_airspeed_valid && (hrt_absolute_time() - _airspeed_last_received) > 1e6) {
 			_airspeed_valid = false;
